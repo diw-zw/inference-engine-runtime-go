@@ -79,10 +79,18 @@ func TestRBGSourceLifecycle(t *testing.T) {
 	sourceDone := make(chan error, 1)
 	go func() { sourceDone <- source.Run(ctx, notify) }()
 
-	// Snapshot sees the declared signal but not labels of other consumers.
-	snapshot, err := source.Snapshot(ctx)
-	if err != nil {
-		t.Fatalf("snapshot: %v", err)
+	// Snapshot reads the watched object; retry until the informer has
+	// synced, exactly like the runtime's initial synchronization.
+	var snapshot runtime.SourceSnapshot
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		snapshot, err = source.Snapshot(ctx)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("snapshot: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !snapshot.Has("example.com/update", "true") {
 		t.Fatalf("snapshot signals = %v", snapshot.Signals)

@@ -36,19 +36,25 @@ type observation struct {
 	signals         map[runtime.Signal]bool
 }
 
+// errNotSynced reports that API-mode observation has not started or
+// synced yet. It is distinct from fail-closed protocol errors, which are
+// returned as soon as the object is observed.
+var errNotSynced = errors.New("rbg: source observation has not started or synced yet")
+
 // Source observes one RoleInstance in one namespace and acknowledges
 // completed signals by removing only the labels this runtime executed.
 type Source struct {
-	client       dynamic.Interface
-	namespace    string
-	name         string
-	labelFile    string
-	fileSnapshot bool
-	replayTTL    time.Duration
-	suppressMu   sync.Mutex
-	suppressed   map[runtime.Signal]time.Time
-	pollEvery    time.Duration
-	logger       *slog.Logger
+	client     dynamic.Interface
+	namespace  string
+	name       string
+	labelFile  string
+	storeMu    sync.RWMutex
+	store      kcache.Store
+	replayTTL  time.Duration
+	suppressMu sync.Mutex
+	suppressed map[runtime.Signal]time.Time
+	pollEvery  time.Duration
+	logger     *slog.Logger
 }
 
 // Option configures a Source.
@@ -63,11 +69,12 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// WithLabelFile switches the wake-up mechanism from an informer to polling
-// a downwardAPI label file. The file must project the Pod's
-// metadata.labels (the RoleInstance controller mirrors signalLabels keys
-// onto member Pods). By default the file is only a change trigger and the
-// snapshot still GETs the RoleInstance; see WithFileSnapshot.
+// WithLabelFile switches the source to file observation: the snapshot is
+// the projected Pod label list and the source performs no API call before
+// an acknowledgement. The file must be a downwardAPI projection of the
+// Pod's metadata.labels (the RoleInstance controller mirrors signalLabels
+// keys onto member Pods). This removes LIST/WATCH and per-snapshot GET
+// calls; see WithReplaySuppressTTL for the accepted trade-offs.
 func WithLabelFile(path string) Option {
 	return func(s *Source) {
 		if path != "" {
@@ -82,39 +89,23 @@ func WithPollInterval(interval time.Duration) Option {
 	return func(s *Source) { s.pollEvery = interval }
 }
 
-// WithFileSnapshot makes the label file the snapshot basis as well as the
-// wake-up trigger. This is the low-API-load mode: the executor performs no
-// GET until an acknowledgement. Weakened semantics, accepted deliberately:
-//
-//   - the trigger condition degrades to "label present on the Pod": the
-//     file carries neither hook-state nor lifecycle declaration. During
-//     controller-side cleanup (hook removal or marker key/value change) a
-//     stale file can trigger a late callback; acknowledgement returns
-//     Stale and the runtime converges, but callbacks must be idempotent
-//     and phase-tolerant, which the Callback contract already requires.
-//   - after an acknowledgement the mirrored label lingers in the file
-//     until the controller and kubelet propagate the removal; a replay
-//     cache suppresses such signals for WithReplaySuppressTTL.
-//
-// Acknowledgement still GETs the RoleInstance and validates hook-state,
-// declaration, and label value before patching, so write-back safety is
-// unchanged.
-func WithFileSnapshot() Option {
-	return func(s *Source) { s.fileSnapshot = true }
-}
-
 // WithReplaySuppressTTL sets how long a signal stays hidden from file
 // snapshots after it was acknowledged or observed as stale (default 30s).
-// It only applies in file-snapshot mode and must cover the RI-to-Pod
-// mirror plus kubelet file propagation.
+// In file mode it must cover the RI-to-Pod mirror plus kubelet file
+// propagation. In API mode it bounds re-examination of suppressed signals
+// and missed watch updates. Acknowledgement always GETs the RoleInstance
+// and validates hook-state, declaration, and label value before patching,
+// so write-back safety is unchanged in both modes.
 func WithReplaySuppressTTL(ttl time.Duration) Option {
 	return func(s *Source) { s.replayTTL = ttl }
 }
 
-// New creates a source bound to a single RoleInstance. By default it uses
-// an informer that watches only that object via a metadata.name field
-// selector. Execution and acknowledgement always use direct GETs; see
-// WithLabelFile for the file-based wake-up mode.
+// New creates a source bound to a single RoleInstance. By default it
+// observes through an informer watching only that object via a
+// metadata.name field selector; the snapshot reads the watched object and
+// performs no extra GET. With WithLabelFile the snapshot becomes the
+// projected Pod label list instead. Acknowledgement always re-GETs and
+// validates before patching.
 func New(client dynamic.Interface, namespace string, name string, opts ...Option) (*Source, error) {
 	if client == nil {
 		return nil, errors.New("rbg: dynamic client must not be nil")
@@ -141,17 +132,15 @@ func New(client dynamic.Interface, namespace string, name string, opts ...Option
 	if source.labelFile != "" && source.pollEvery <= 0 {
 		return nil, errors.New("rbg: label-file polling interval must be positive")
 	}
-	if source.fileSnapshot && source.labelFile == "" {
-		return nil, errors.New("rbg: file snapshot requires WithLabelFile")
-	}
-	if source.fileSnapshot && source.replayTTL <= 0 {
+	if source.replayTTL <= 0 {
 		return nil, errors.New("rbg: replay suppression TTL must be positive")
 	}
 	return source, nil
 }
 
-// Run observes until ctx is done. Notifications are coalesced and never
-// carry execution state. Run returns nil once ctx is canceled.
+// Run observes until ctx is done: file mode polls the label file, API mode
+// watches the RoleInstance. Notifications are coalesced and never carry
+// execution state. Run returns nil once ctx is canceled.
 func (s *Source) Run(ctx context.Context, notify chan<- struct{}) error {
 	if s.labelFile != "" {
 		return s.runLabelFile(ctx, notify)
@@ -159,8 +148,10 @@ func (s *Source) Run(ctx context.Context, notify chan<- struct{}) error {
 	return s.runInformer(ctx, notify)
 }
 
-// runInformer wakes up on RoleInstance changes. The informer is only a
-// wake-up mechanism; the execution basis is always a direct GET.
+// runInformer observes the RoleInstance through an informer. The watched
+// object in the informer store is the observation result: Snapshot reads
+// it without another API call. A periodic fallback notification bounds how
+// long replay-suppressed signals or missed watch updates stay unseen.
 func (s *Source) runInformer(ctx context.Context, notify chan<- struct{}) error {
 	tweak := func(options *metav1.ListOptions) {
 		options.FieldSelector = fields.OneTermEqualSelector("metadata.name", s.name).String()
@@ -181,54 +172,32 @@ func (s *Source) runInformer(ctx context.Context, notify chan<- struct{}) error 
 	if !kcache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return nil
 	}
-	<-ctx.Done()
-	return nil
-}
+	s.setStore(informer.GetStore())
 
-// runLabelFile wakes up on label-file changes instead of watching the API
-// server. The file is expected to be a downwardAPI projection of the Pod's
-// metadata.labels. Only its raw content is compared: the runtime never
-// treats the file as an execution basis (hook-state and lifecycle
-// declarations are not mirrored to Pods), so a change here only triggers a
-// fresh Snapshot, which GETs the RoleInstance directly. This removes the
-// LIST/WATCH connection to the API server at the cost of wake-up latency
-// bounded by the RI-to-Pod mirror and kubelet file propagation.
-func (s *Source) runLabelFile(ctx context.Context, notify chan<- struct{}) error {
-	last, err := os.ReadFile(s.labelFile)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			s.logger.Warn("read label file failed", "path", s.labelFile, "error", err)
-		}
-		last = nil
-	}
-
-	ticker := time.NewTicker(s.pollEvery)
+	ticker := time.NewTicker(s.replayTTL)
 	defer ticker.Stop()
-	var lastError string
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			content, err := os.ReadFile(s.labelFile)
-			if err != nil && !errors.Is(err, fs.ErrNotExist) {
-				// Throttle identical read errors; a missing file is a
-				// normal state before the volume is mounted.
-				if err.Error() != lastError {
-					s.logger.Warn("read label file failed", "path", s.labelFile, "error", err)
-					lastError = err.Error()
-				}
-				continue
-			}
-			if err == nil {
-				lastError = ""
-			} else {
-				content = nil
-			}
-			if bytes.Equal(content, last) {
-				continue
-			}
-			last = content
+			notifySource(notify)
+		}
+	}
+}
+
+// runLabelFile ticks at the polling interval instead of watching the API
+// server. Snapshot reads the file itself, so every tick is a complete
+// wake-up: change detection would save nothing but code. Observation
+// freshness is therefore bounded by the polling interval.
+func (s *Source) runLabelFile(ctx context.Context, notify chan<- struct{}) error {
+	ticker := time.NewTicker(s.pollEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
 			notifySource(notify)
 		}
 	}
@@ -241,25 +210,58 @@ func notifySource(notify chan<- struct{}) {
 	}
 }
 
-// Snapshot returns the currently executable signals via a direct GET. It
-// fails closed on unknown hook-state values, malformed lifecycle snapshots,
-// and keys declared by more than one hook.
+func (s *Source) setStore(store kcache.Store) {
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
+	s.store = store
+}
+
+func (s *Source) currentStore() kcache.Store {
+	s.storeMu.RLock()
+	defer s.storeMu.RUnlock()
+	return s.store
+}
+
+// Snapshot returns the last observed state without an extra API call: the
+// informer store in API mode, or the label file in file mode. It fails
+// closed on unknown hook-state values, malformed lifecycle snapshots, and
+// keys declared by more than one hook. Acknowledgement is the only
+// strongly consistent step: it re-GETs and validates before patching.
 func (s *Source) Snapshot(ctx context.Context) (runtime.SourceSnapshot, error) {
-	if s.fileSnapshot {
+	if s.labelFile != "" {
 		return s.snapshotFromLabelFile()
 	}
-	object, err := s.get(ctx)
+	return s.snapshotFromStore()
+}
+
+// snapshotFromStore reads the watched RoleInstance from the informer
+// store. It errors until Run has synced the cache; a missing object means
+// the RoleInstance is deleted, which is an empty observation.
+func (s *Source) snapshotFromStore() (runtime.SourceSnapshot, error) {
+	store := s.currentStore()
+	if store == nil {
+		return runtime.SourceSnapshot{}, errNotSynced
+	}
+	item, exists, err := store.GetByKey(s.namespace + "/" + s.name)
 	if err != nil {
-		return runtime.SourceSnapshot{}, err
+		return runtime.SourceSnapshot{}, fmt.Errorf("rbg: read observed RoleInstance %s/%s: %w", s.namespace, s.name, err)
+	}
+	if !exists {
+		// Deleted object: no signal can be executable.
+		return runtime.SourceSnapshot{Token: &observation{signals: map[runtime.Signal]bool{}}}, nil
+	}
+	object, ok := item.(*unstructured.Unstructured)
+	if !ok {
+		return runtime.SourceSnapshot{}, fmt.Errorf("rbg: unexpected observed object type %T", item)
 	}
 	return s.buildSnapshot(object)
 }
 
 // snapshotFromLabelFile builds the snapshot from the projected Pod labels.
 // In this mode "executable signal" degrades to "label present with the
-// declared value" (see WithFileSnapshot). The replay cache hides signals
-// that were recently acknowledged or observed as stale while the mirrored
-// file still shows them.
+// declared value". The replay cache hides signals that were recently
+// acknowledged or observed as stale while the mirrored file still shows
+// them.
 func (s *Source) snapshotFromLabelFile() (runtime.SourceSnapshot, error) {
 	content, err := os.ReadFile(s.labelFile)
 	if err != nil {
@@ -405,9 +407,14 @@ func (s *Source) buildSnapshot(object *unstructured.Unstructured) (runtime.Sourc
 		}
 	}
 
+	// The replay cache hides recently acknowledged or stale signals so
+	// observation lag cannot replay them into execution.
 	signals := make([]runtime.Signal, 0, len(token.signals))
+	now := time.Now()
 	for signal := range token.signals {
-		signals = append(signals, signal)
+		if !s.isSuppressed(signal, now) {
+			signals = append(signals, signal)
+		}
 	}
 	sort.Slice(signals, func(i, j int) bool {
 		if signals[i].Key != signals[j].Key {
@@ -482,6 +489,12 @@ func (s *Source) Ack(ctx context.Context, snapshot runtime.SourceSnapshot, signa
 	for attempt := 0; attempt < maxAckConflicts; attempt++ {
 		object, err := s.get(ctx)
 		if err != nil {
+			// A deleted RoleInstance invalidates the observation
+			// definitively; retrying would never succeed.
+			if kerrors.IsNotFound(err) {
+				s.suppressSignal(signal)
+				return runtime.Stale, nil
+			}
 			return 0, err
 		}
 		stale, err := s.validateForAck(object, token, signal)

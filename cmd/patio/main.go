@@ -35,7 +35,6 @@ type cliConfig struct {
 	riName          string
 	kubeconfig      string
 	labelFile       string
-	labelSnapshot   bool
 	labelPollEvery  time.Duration
 	callbackTimeout time.Duration
 	startBudget     time.Duration
@@ -60,7 +59,6 @@ func addCommonFlags(flags *flag.FlagSet, config *cliConfig) {
 	flags.StringVar(&config.riName, "ri-name", "", "RoleInstance name (required for --source=rbg)")
 	flags.StringVar(&config.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "path to kubeconfig (defaults to in-cluster configuration)")
 	flags.StringVar(&config.labelFile, "label-file", envOr("PATIO_LABEL_FILE", ""), "downwardAPI label file used for wake-up instead of watching the API server (requires --source=rbg)")
-	flags.BoolVar(&config.labelSnapshot, "label-snapshot", false, "also use the label file as the snapshot basis (lower API load, weaker trigger semantics; requires --label-file)")
 }
 
 func addRunFlags(flags *flag.FlagSet, config *cliConfig) {
@@ -122,7 +120,6 @@ common flags:
   -ri-name NAME         RoleInstance name (source=rbg)
   -kubeconfig PATH      kubeconfig path (env KUBECONFIG)
   -label-file PATH      downwardAPI label file for wake-up instead of watch (env PATIO_LABEL_FILE, requires source=rbg)
-  -label-snapshot       also read snapshots from the label file (requires -label-file)
 
 run-only flags control callback timeout, start/shutdown budgets, backoff,
 the label-file polling interval, and the diagnostics listen address
@@ -153,9 +150,6 @@ func validateSourceConfig(config *cliConfig) error {
 		}
 		if config.labelFile != "" && config.labelPollEvery <= 0 {
 			return errors.New("--label-file requires a positive --label-poll-interval")
-		}
-		if config.labelSnapshot && config.labelFile == "" {
-			return errors.New("--label-snapshot requires --label-file")
 		}
 		return nil
 	default:
@@ -253,9 +247,6 @@ func newRBGSource(logger *slog.Logger, config *cliConfig) (runtime.SignalSource,
 	sourceOptions := []rbg.Option{rbg.WithLogger(logger.With("source", "rbg"))}
 	if config.labelFile != "" {
 		sourceOptions = append(sourceOptions, rbg.WithLabelFile(config.labelFile))
-		if config.labelSnapshot {
-			sourceOptions = append(sourceOptions, rbg.WithFileSnapshot())
-		}
 		if config.labelPollEvery > 0 {
 			sourceOptions = append(sourceOptions, rbg.WithPollInterval(config.labelPollEvery))
 		}

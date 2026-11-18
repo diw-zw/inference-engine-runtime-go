@@ -118,11 +118,9 @@ examples/  deploy/  test/integration/
 
 适配器的行为：
 
-- 只观察单个 RoleInstance（LIST/WATCH 带 `metadata.name` field selector）；执行依据和确认都通过直接 GET 读取，不依赖缓存；
-- 信号可执行需同时满足：hook-state 标签为 PreUpdate / PreRecover / PostReady / PreDelete 之一，`spec.lifecycle` 声明了该 `key=value`，且 RoleInstance 上实际存在这个标签；
-- 确认前重新 GET，核对 UID（对象的唯一标识）、hook-state、声明都未变化后，用带 resourceVersion 的 merge patch 只删除自己负责的标签；写冲突（409）时重读重试；任何不匹配都放弃写回，不清除别人的信号。
-- 可选文件唤醒：设置 `--label-file` 后，runtime 轮询一个 downwardAPI 投影的 Pod label 文件（controller 会把信号 label 从 RoleInstance 镜像到成员 Pod），替代对 API server 的 watch。执行依据和确认不变，仍走 GET / PATCH；RBAC 从 get/list/watch/patch 收窄为 get/patch。唤醒延迟受镜像传播影响，不影响正确性。配置示例见 `deploy/runtime-deployment.yaml`。
-- 可选文件快照（`--label-snapshot`，需配合 `--label-file`）：Snapshot 也改为读该文件，runtime 直到确认前都不访问 API server。触发条件弱化为“Pod label 存在”（文件中没有 hook-state 和声明）；确认仍在 API 侧完整校验后才写回。已知代价：配置变更窗口内可能迟到执行（回调幂等契约覆盖），确认后文件残留期由重放缓存抑制（TTL 默认 30 秒）。适合大规模集群把 API 压力降到只剩 Ack 的 GET/PATCH。
+- 观察即快照，两种模式：API 模式（默认）用限定单对象的 informer watch（LIST/WATCH 带 `metadata.name` field selector）维护观察结果，Snapshot 读取 watch 缓存，不做逐次 GET；文件模式（`--label-file`）轮询 downwardAPI 投影的 Pod label 文件（controller 会把信号 label 从 RoleInstance 镜像到成员 Pod），Snapshot 就是文件内容，确认前不访问 API server，RBAC 收窄为 get/patch。快照是最终一致的：watch 延迟、轮询间隔或镜像传播；
+- API 模式的信号可执行需同时满足：hook-state 标签为 PreUpdate / PreRecover / PostReady / PreDelete 之一，`spec.lifecycle` 声明了该 `key=value`，且 RoleInstance 上实际存在这个标签；文件模式退化为“Pod label 存在且值匹配”——文件里没有 hook-state 和声明，配置变更窗口内可能迟到执行，由回调幂等契约覆盖；
+- 确认是唯一的强一致步骤：重新 GET，核对 UID（对象的唯一标识）、hook-state、声明都未变化后，用带 resourceVersion 的 merge patch 只删除自己负责的标签；写冲突（409）时重读重试；任何不匹配都放弃写回，不清除别人的信号；对象已被删除时返回 stale，不无限重试。确认或失效后的信号在重放缓存 TTL（默认 30 秒）内不再出现在快照里，覆盖观察滞后造成的重放窗口。
 
 注意：该协议还没有任何已发布的 RBG controller 实现。这个适配器只通过了 `test/integration` 中测试 CRD fixture 的验证，不能视为与真实集群版本兼容。RBAC 与部署示例见 `deploy/`。
 
