@@ -451,6 +451,206 @@ func assertQuiet(t *testing.T, notify <-chan struct{}, window time.Duration) {
 	}
 }
 
+func TestParseDownwardAPILabels(t *testing.T) {
+	labels, malformed := parseDownwardAPILabels(
+		"example.com/update=\"true\"\n" +
+			"example.com/empty=\"\"\n" +
+			"example.com/plain=true\n" +
+			"\n" +
+			"malformed-line\n")
+	if len(malformed) != 1 || malformed[0] != "malformed-line" {
+		t.Fatalf("malformed lines = %v", malformed)
+	}
+	want := map[string]string{
+		"example.com/update": "true",
+		"example.com/empty":  "",
+		"example.com/plain":  "true",
+	}
+	if len(labels) != len(want) {
+		t.Fatalf("labels = %#v", labels)
+	}
+	for key, value := range want {
+		if labels[key] != value {
+			t.Fatalf("labels[%q] = %q, want %q", key, labels[key], value)
+		}
+	}
+}
+
+func TestFileSnapshotAndReplaySuppression(t *testing.T) {
+	const ns, name, uid = "apps", "ri-0", "uid-1"
+	object := roleInstance(ns, name, uid, map[string]string{
+		HookStateLabel:         HookStatePreUpdate,
+		"example.com/update":   "true",
+		"example.com/consumer": "true",
+	}, hookConfig(map[string]string{"example.com/update": "true"}))
+	client := newTestClient(t, object)
+
+	path := filepath.Join(t.TempDir(), "labels")
+	writeLabelFile(t, path, "example.com/update=\"true\"\nexample.com/consumer=\"true\"\n")
+	source, err := New(client, ns, name,
+		WithLogger(slog.New(slog.DiscardHandler)),
+		WithLabelFile(path),
+		WithFileSnapshot(),
+		WithReplaySuppressTTL(60*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := source.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !snapshot.Has("example.com/update", "true") {
+		t.Fatalf("file snapshot signals = %v", snapshot.Signals)
+	}
+	// Labels that are not bound are visible to the runtime but ignored by
+	// its binding filter; the source cannot know the bindings.
+	if !snapshot.Has("example.com/consumer", "true") {
+		t.Fatal("file snapshot must expose every pod label")
+	}
+
+	status, err := source.Ack(context.Background(), snapshot, runtime.Signal{Key: "example.com/update", Value: "true"})
+	if err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if status != runtime.Acknowledged {
+		t.Fatalf("status = %v", err)
+	}
+
+	// The label is gone from the RoleInstance but still in the file; the
+	// replay cache must hide it while the mirror propagates.
+	after, err := source.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Has("example.com/update", "true") {
+		t.Fatal("recently acknowledged signal must be suppressed")
+	}
+	if !after.Has("example.com/consumer", "true") {
+		t.Fatal("suppression must be per signal")
+	}
+
+	updated, err := client.Resource(RoleInstanceGVR).Namespace(ns).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := updated.GetLabels()["example.com/update"]; present {
+		t.Fatal("acknowledged label must be removed from the RoleInstance")
+	}
+}
+
+func TestFileSnapshotStaleAckSuppressesReplay(t *testing.T) {
+	const ns, name, uid = "apps", "ri-0", "uid-1"
+	object := roleInstance(ns, name, uid, map[string]string{
+		HookStateLabel:       HookStatePreUpdate,
+		"example.com/update": "true",
+	}, hookConfig(map[string]string{"example.com/update": "true"}))
+	client := newTestClient(t, object)
+
+	path := filepath.Join(t.TempDir(), "labels")
+	writeLabelFile(t, path, "example.com/update=\"true\"\n")
+	source, err := New(client, ns, name,
+		WithLogger(slog.New(slog.DiscardHandler)),
+		WithLabelFile(path),
+		WithFileSnapshot(),
+		WithReplaySuppressTTL(60*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := source.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The controller removed the label (for example a config change)
+	// before acknowledgement; the file still shows it.
+	object.SetLabels(withoutLabels(object, "example.com/update"))
+	if err := client.Tracker().Update(RoleInstanceGVR, object, ns); err != nil {
+		t.Fatalf("update tracker: %v", err)
+	}
+
+	status, err := source.Ack(context.Background(), snapshot, runtime.Signal{Key: "example.com/update", Value: "true"})
+	if err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if status != runtime.Stale {
+		t.Fatalf("status = %v, want stale", status)
+	}
+
+	after, err := source.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Has("example.com/update", "true") {
+		t.Fatal("stale signal must be suppressed while the file lags")
+	}
+}
+
+func TestFileSnapshotMissingFileAndTTLExpiry(t *testing.T) {
+	const ns, name, uid = "apps", "ri-0", "uid-1"
+	object := roleInstance(ns, name, uid, map[string]string{
+		HookStateLabel:       HookStatePreUpdate,
+		"example.com/update": "true",
+	}, hookConfig(map[string]string{"example.com/update": "true"}))
+	client := newTestClient(t, object)
+
+	path := filepath.Join(t.TempDir(), "labels")
+	source, err := New(client, ns, name,
+		WithLogger(slog.New(slog.DiscardHandler)),
+		WithLabelFile(path),
+		WithFileSnapshot(),
+		WithReplaySuppressTTL(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Missing file is an empty, valid observation.
+	snapshot, err := source.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snapshot.Signals) != 0 {
+		t.Fatalf("missing file must yield no signals: %v", snapshot.Signals)
+	}
+
+	// Suppression expires with the TTL and the signal becomes visible
+	// again.
+	writeLabelFile(t, path, "example.com/update=\"true\"\n")
+	snapshot, err = source.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := source.Ack(context.Background(), snapshot, runtime.Signal{Key: "example.com/update", Value: "true"})
+	if err != nil || status != runtime.Acknowledged {
+		t.Fatalf("ack = %v, %v", status, err)
+	}
+	if snapshot, err = source.Snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Has("example.com/update", "true") {
+		t.Fatal("signal must be suppressed immediately after acknowledgement")
+	}
+	time.Sleep(15 * time.Millisecond)
+	if snapshot, err = source.Snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Has("example.com/update", "true") {
+		t.Fatal("signal must be visible again after the TTL expires")
+	}
+}
+
+func TestFileSnapshotValidation(t *testing.T) {
+	if _, err := New(newTestClient(t), "ns", "name", WithFileSnapshot()); err == nil {
+		t.Fatal("file snapshot without a label file must be rejected")
+	}
+	if _, err := New(newTestClient(t), "ns", "name", WithLabelFile("/tmp/x"), WithFileSnapshot(), WithReplaySuppressTTL(0)); err == nil {
+		t.Fatal("non-positive suppression TTL must be rejected")
+	}
+}
+
 func TestAckRetriesMergePatchConflict(t *testing.T) {
 	const ns, name, uid = "apps", "ri-0", "uid-1"
 	object := roleInstance(ns, name, uid, map[string]string{

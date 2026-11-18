@@ -214,12 +214,18 @@ CLI 提供 `run --config <path>` 和 `validate --config <path>`。运行参数�
 - 不 watch RBG/RIS/Pod，不以 Pod 镜像为权威，不接入旧 RIS lifecycle。
 - GVR、wire names、快照读取和所有协议分支集中在 `source/rbg`；核心 API 不 import Kubernetes/RBG 类型。
 
-可选的文件唤醒模式：controller 本来就会把 `signalLabels` 的 key 从 RI 镜像到成员 Pod；Pod 侧用 downwardAPI 把 `metadata.labels` 投影为文件后，source 可以轮询该文件作为唤醒机制，替代 informer。约束与取舍：
+可选的文件唤醒模式（默认）：controller 本来就会把 `signalLabels` 的 key 从 RI 镜像到成员 Pod；Pod 侧用 downwardAPI 把 `metadata.labels` 投影为文件后，source 可以轮询该文件作为唤醒机制，替代 informer。约束与取舍：
 
 - 只替换唤醒。执行依据（Snapshot）和确认（Ack）仍通过直接 GET / PATCH 访问 RI，协议校验不变。
-- hook-state 与 `spec.lifecycle` 不镜像到 Pod，因此文件内容不能作为执行依据，只能作为变更提示。
+- hook-state 与 `spec.lifecycle` 不镜像到 Pod，因此默认模式下文件内容只作为变更提示，不作为执行依据。
 - 收益是 executor 不再对 API server 维持 LIST/WATCH 连接（N 个 executor 不再新增 N 条 watch），RBAC 收窄为 get/patch。
 - 唤醒延迟受 RI→Pod 镜像与 kubelet 文件更新的最终一致传播影响；由于执行前总是重新 GET，不影响正确性。
+
+文件快照模式（`--label-snapshot`）：Snapshot 也从文件读取，把执行期 GET 也去掉，API 调用只剩 Ack 的 GET/PATCH。这是一个显式接受的弱化，适用前提是 Callback 幂等契约与大规模集群的 API 压力优先级：
+
+- 触发条件退化为“Pod label 存在与值匹配”：文件没有 hook-state 和 lifecycle 声明，controller 侧清理（hook 删除、marker 改值）的窗口内可能迟到执行；Ack 返回 stale 使运行时收敛，不写回。
+- Ack 前仍在 API 侧校验当前态（hook-state 可执行、声明匹配、label 值匹配），写回安全不降级；观察凭据退化为信号集合，UID/hook-state 对比不可用，ABA 窗口比 API 模式宽。
+- 确认或观察到 stale 后，镜像 label 在文件中残留的传播窗口内由 source 侧重放缓存（TTL 默认 30s）抑制，避免幂等回调被空转重复调用。
 
 ### 触发条件
 
