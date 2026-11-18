@@ -214,6 +214,13 @@ CLI 提供 `run --config <path>` 和 `validate --config <path>`。运行参数�
 - 不 watch RBG/RIS/Pod，不以 Pod 镜像为权威，不接入旧 RIS lifecycle。
 - GVR、wire names、快照读取和所有协议分支集中在 `source/rbg`；核心 API 不 import Kubernetes/RBG 类型。
 
+可选的文件唤醒模式：controller 本来就会把 `signalLabels` 的 key 从 RI 镜像到成员 Pod；Pod 侧用 downwardAPI 把 `metadata.labels` 投影为文件后，source 可以轮询该文件作为唤醒机制，替代 informer。约束与取舍：
+
+- 只替换唤醒。执行依据（Snapshot）和确认（Ack）仍通过直接 GET / PATCH 访问 RI，协议校验不变。
+- hook-state 与 `spec.lifecycle` 不镜像到 Pod，因此文件内容不能作为执行依据，只能作为变更提示。
+- 收益是 executor 不再对 API server 维持 LIST/WATCH 连接（N 个 executor 不再新增 N 条 watch），RBAC 收窄为 get/patch。
+- 唤醒延迟受 RI→Pod 镜像与 kubelet 文件更新的最终一致传播影响；由于执行前总是重新 GET，不影响正确性。
+
 ### 触发条件
 
 只有以下条件同时成立才提供可执行 signal：
@@ -240,7 +247,7 @@ KEP 没有 hook 操作代次，因此相同 UID、hook、key/value 的重复触�
 - 每个目标及其负责的 signal 只有一个逻辑执行者；不让多个 Pod 分别执行后争抢删除共享 label。
 - PreDelete 按 KEP 使用独立于业务 Pod 的 executor；故障后的 PreRecover 也不能依赖已经不可用的业务 Pod。
 - 单 RI 独立部署示例采用单副本、Recreate；这不等于分布式执行互斥保证。
-- RBAC 仅提供 RI get/list/watch/patch，结合 namespace、resourceNames 和相匹配的 field selector 收窄范围；原生 RBAC 不能限制 PATCH 的 label 字段。
+- RBAC 仅提供 RI get/list/watch/patch，结合 namespace、resourceNames 和相匹配的 field selector 收窄范围；使用文件唤醒模式时收窄为 get/patch。原生 RBAC 不能限制 PATCH 的 label 字段。
 - PostReady 不门控 RI Ready，runtime 健康状态也不代表业务动作已完成。
 
 ### 上游草案限制

@@ -42,6 +42,8 @@ spec:
             - --source=rbg
             - --ri-namespace=REPLACE_ME
             - --ri-name=REPLACE_ME_RI_NAME
+            - --label-file=/etc/podinfo/labels
+            - --label-poll-interval=1s
           ports:
             - name: diagnostics
               containerPort: 9090
@@ -57,7 +59,20 @@ spec:
             - name: events
               mountPath: /etc/patio
               readOnly: true
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
       volumes:
         - name: events
           configMap:
             name: patio-events
+        # The RoleInstance controller mirrors signalLabels keys onto member
+        # Pods; downwardAPI projects the Pod labels into a file. The runtime
+        # polls this file as its wake-up mechanism instead of watching the
+        # RoleInstance, which keeps RBAC down to get+patch.
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: labels
+                fieldRef:
+                  fieldPath: metadata.labels

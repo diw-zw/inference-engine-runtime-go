@@ -70,7 +70,7 @@ func TestRBGSourceLifecycle(t *testing.T) {
 		t.Fatalf("create RoleInstance: %v", err)
 	}
 
-	source, err := rbg.New(client, "apps", "ri-integration", slog.New(slog.DiscardHandler))
+	source, err := rbg.New(client, "apps", "ri-integration", rbg.WithLogger(slog.New(slog.DiscardHandler)))
 	if err != nil {
 		t.Fatal(err)
 	}

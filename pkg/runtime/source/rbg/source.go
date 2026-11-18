@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"sort"
+	"time"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,13 +39,48 @@ type Source struct {
 	client    dynamic.Interface
 	namespace string
 	name      string
+	labelFile string
+	pollEvery time.Duration
 	logger    *slog.Logger
 }
 
-// New creates a source bound to a single RoleInstance. The informer watches
-// only that object via a metadata.name field selector; execution and
-// acknowledgement always use direct GETs.
-func New(client dynamic.Interface, namespace string, name string, logger *slog.Logger) (*Source, error) {
+// Option configures a Source.
+type Option func(*Source)
+
+// WithLogger sets the source logger. The default is slog.Default().
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Source) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
+
+// WithLabelFile switches the wake-up mechanism from an informer to polling
+// a downwardAPI label file. The file must project the Pod's
+// metadata.labels (the RoleInstance controller mirrors signalLabels keys
+// onto member Pods). The file is only a change trigger: execution basis and
+// acknowledgement still use direct GETs and PATCHes on the RoleInstance, so
+// LIST/WATCH permissions are not required.
+func WithLabelFile(path string) Option {
+	return func(s *Source) {
+		if path != "" {
+			s.labelFile = path
+		}
+	}
+}
+
+// WithPollInterval sets the label-file polling interval (default 1s). It
+// only applies when a label file is configured.
+func WithPollInterval(interval time.Duration) Option {
+	return func(s *Source) { s.pollEvery = interval }
+}
+
+// New creates a source bound to a single RoleInstance. By default it uses
+// an informer that watches only that object via a metadata.name field
+// selector. Execution and acknowledgement always use direct GETs; see
+// WithLabelFile for the file-based wake-up mode.
+func New(client dynamic.Interface, namespace string, name string, opts ...Option) (*Source, error) {
 	if client == nil {
 		return nil, errors.New("rbg: dynamic client must not be nil")
 	}
@@ -52,16 +90,36 @@ func New(client dynamic.Interface, namespace string, name string, logger *slog.L
 	if name == "" {
 		return nil, errors.New("rbg: RoleInstance name must not be empty")
 	}
-	if logger == nil {
-		logger = slog.Default()
+	source := &Source{
+		client:    client,
+		namespace: namespace,
+		name:      name,
+		pollEvery: time.Second,
+		logger:    slog.Default(),
 	}
-	return &Source{client: client, namespace: namespace, name: name, logger: logger}, nil
+	for _, opt := range opts {
+		if opt != nil {
+			opt(source)
+		}
+	}
+	if source.labelFile != "" && source.pollEvery <= 0 {
+		return nil, errors.New("rbg: label-file polling interval must be positive")
+	}
+	return source, nil
 }
 
-// Run watches the RoleInstance until ctx is done. The informer is only a
-// wake-up mechanism: notifications are coalesced and never carry execution
-// state. Run returns nil once ctx is canceled.
+// Run observes until ctx is done. Notifications are coalesced and never
+// carry execution state. Run returns nil once ctx is canceled.
 func (s *Source) Run(ctx context.Context, notify chan<- struct{}) error {
+	if s.labelFile != "" {
+		return s.runLabelFile(ctx, notify)
+	}
+	return s.runInformer(ctx, notify)
+}
+
+// runInformer wakes up on RoleInstance changes. The informer is only a
+// wake-up mechanism; the execution basis is always a direct GET.
+func (s *Source) runInformer(ctx context.Context, notify chan<- struct{}) error {
 	tweak := func(options *metav1.ListOptions) {
 		options.FieldSelector = fields.OneTermEqualSelector("metadata.name", s.name).String()
 	}
@@ -83,6 +141,55 @@ func (s *Source) Run(ctx context.Context, notify chan<- struct{}) error {
 	}
 	<-ctx.Done()
 	return nil
+}
+
+// runLabelFile wakes up on label-file changes instead of watching the API
+// server. The file is expected to be a downwardAPI projection of the Pod's
+// metadata.labels. Only its raw content is compared: the runtime never
+// treats the file as an execution basis (hook-state and lifecycle
+// declarations are not mirrored to Pods), so a change here only triggers a
+// fresh Snapshot, which GETs the RoleInstance directly. This removes the
+// LIST/WATCH connection to the API server at the cost of wake-up latency
+// bounded by the RI-to-Pod mirror and kubelet file propagation.
+func (s *Source) runLabelFile(ctx context.Context, notify chan<- struct{}) error {
+	last, err := os.ReadFile(s.labelFile)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			s.logger.Warn("read label file failed", "path", s.labelFile, "error", err)
+		}
+		last = nil
+	}
+
+	ticker := time.NewTicker(s.pollEvery)
+	defer ticker.Stop()
+	var lastError string
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			content, err := os.ReadFile(s.labelFile)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				// Throttle identical read errors; a missing file is a
+				// normal state before the volume is mounted.
+				if err.Error() != lastError {
+					s.logger.Warn("read label file failed", "path", s.labelFile, "error", err)
+					lastError = err.Error()
+				}
+				continue
+			}
+			if err == nil {
+				lastError = ""
+			} else {
+				content = nil
+			}
+			if bytes.Equal(content, last) {
+				continue
+			}
+			last = content
+			notifySource(notify)
+		}
+	}
 }
 
 func notifySource(notify chan<- struct{}) {

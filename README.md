@@ -121,6 +121,7 @@ examples/  deploy/  test/integration/
 - 只观察单个 RoleInstance（LIST/WATCH 带 `metadata.name` field selector）；执行依据和确认都通过直接 GET 读取，不依赖缓存；
 - 信号可执行需同时满足：hook-state 标签为 PreUpdate / PreRecover / PostReady / PreDelete 之一，`spec.lifecycle` 声明了该 `key=value`，且 RoleInstance 上实际存在这个标签；
 - 确认前重新 GET，核对 UID（对象的唯一标识）、hook-state、声明都未变化后，用带 resourceVersion 的 merge patch 只删除自己负责的标签；写冲突（409）时重读重试；任何不匹配都放弃写回，不清除别人的信号。
+- 可选文件唤醒：设置 `--label-file` 后，runtime 轮询一个 downwardAPI 投影的 Pod label 文件（controller 会把信号 label 从 RoleInstance 镜像到成员 Pod），替代对 API server 的 watch。执行依据和确认不变，仍走 GET / PATCH；RBAC 从 get/list/watch/patch 收窄为 get/patch。唤醒延迟受镜像传播影响，不影响正确性。配置示例见 `deploy/runtime-deployment.yaml`。
 
 注意：该协议还没有任何已发布的 RBG controller 实现。这个适配器只通过了 `test/integration` 中测试 CRD fixture 的验证，不能视为与真实集群版本兼容。RBAC 与部署示例见 `deploy/`。
 

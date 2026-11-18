@@ -3,8 +3,13 @@ package rbg
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -349,6 +354,100 @@ func TestNewValidatesTarget(t *testing.T) {
 	}
 	if _, err := New(newTestClient(t), "ns", "", nil); err == nil {
 		t.Fatal("empty name must be rejected")
+	}
+	if _, err := New(newTestClient(t), "ns", "name", WithLabelFile("/tmp/labels"), WithPollInterval(0)); err == nil {
+		t.Fatal("non-positive poll interval must be rejected with a label file")
+	}
+}
+
+func TestRunLabelFileWakesUpOnChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "labels")
+	client := newTestClient(t)
+	source, err := New(client, "ns", "ri",
+		WithLogger(slog.New(slog.DiscardHandler)),
+		WithLabelFile(path),
+		WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	notify := make(chan struct{}, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- source.Run(ctx, notify) }()
+	defer cancel()
+
+	// The initial read inside Run races with the first write, so vary the
+	// content until the watcher proves it is alive.
+	content := ""
+	deadline := time.Now().Add(2 * time.Second)
+	for attempt := 0; ; attempt++ {
+		content = fmt.Sprintf("example.com/update=\"%d\"\n", attempt)
+		writeLabelFile(t, path, content)
+		select {
+		case <-notify:
+		case <-time.After(25 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("label-file watcher never sent a wake-up")
+			}
+			continue
+		}
+		break
+	}
+
+	// Rewriting identical content must not notify.
+	writeLabelFile(t, path, content)
+	assertQuiet(t, notify, 20*time.Millisecond)
+
+	// Changed content notifies again.
+	writeLabelFile(t, path, "example.com/update=\"false\"\n")
+	expectNotify(t, notify)
+
+	// Removing the file is also a change.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	expectNotify(t, notify)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+}
+
+func writeLabelFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write label file: %v", err)
+	}
+}
+
+func expectNotify(t *testing.T, notify <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a wake-up notification")
+	}
+}
+
+func assertQuiet(t *testing.T, notify <-chan struct{}, window time.Duration) {
+	t.Helper()
+	// Drain anything already queued, then verify the window stays empty.
+	for {
+		select {
+		case <-notify:
+			continue
+		case <-time.After(window):
+			return
+		}
 	}
 }
 

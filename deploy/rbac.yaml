@@ -1,7 +1,9 @@
-# Minimal RBAC for the experimental RoleInstance lifecycle-hook source.
-# Native RBAC cannot restrict PATCH to specific label fields; keep both the
-# resourceNames and the informer's metadata.name field selector aligned with
-# the single RoleInstance this runtime is responsible for.
+# Minimal RBAC for the experimental RoleInstance lifecycle-hook source in
+# label-file mode (--label-file): the runtime never watches the API server,
+# so only get and patch are needed. Native RBAC cannot restrict PATCH to
+# specific label fields; keep resourceNames aligned with the single
+# RoleInstance this runtime is responsible for. Without --label-file the
+# informer additionally needs "list" and "watch".
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -17,7 +19,7 @@ rules:
   - apiGroups: ["workloads.x-k8s.io"]
     resources: ["roleinstances"]
     resourceNames: ["REPLACE_ME_RI_NAME"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

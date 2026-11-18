@@ -34,6 +34,8 @@ type cliConfig struct {
 	riNamespace     string
 	riName          string
 	kubeconfig      string
+	labelFile       string
+	labelPollEvery  time.Duration
 	callbackTimeout time.Duration
 	startBudget     time.Duration
 	shutdownBudget  time.Duration
@@ -56,6 +58,7 @@ func addCommonFlags(flags *flag.FlagSet, config *cliConfig) {
 	flags.StringVar(&config.riNamespace, "ri-namespace", "", "RoleInstance namespace (required for --source=rbg)")
 	flags.StringVar(&config.riName, "ri-name", "", "RoleInstance name (required for --source=rbg)")
 	flags.StringVar(&config.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "path to kubeconfig (defaults to in-cluster configuration)")
+	flags.StringVar(&config.labelFile, "label-file", envOr("PATIO_LABEL_FILE", ""), "downwardAPI label file used for wake-up instead of watching the API server (requires --source=rbg)")
 }
 
 func addRunFlags(flags *flag.FlagSet, config *cliConfig) {
@@ -67,6 +70,7 @@ func addRunFlags(flags *flag.FlagSet, config *cliConfig) {
 	flags.DurationVar(&config.backoffMax, "backoff-max", 30*time.Second, "maximum retry backoff")
 	flags.Float64Var(&config.jitter, "jitter", 0.2, "retry backoff jitter fraction in [0,1)")
 	flags.StringVar(&config.listenAddress, "listen-address", envOr("PATIO_LISTEN_ADDRESS", ":9090"), "diagnostics listen address (empty disables HTTP endpoints)")
+	flags.DurationVar(&config.labelPollEvery, "label-poll-interval", time.Second, "label file polling interval")
 }
 
 func main() {
@@ -115,9 +119,11 @@ common flags:
   -ri-namespace NS      RoleInstance namespace (source=rbg)
   -ri-name NAME         RoleInstance name (source=rbg)
   -kubeconfig PATH      kubeconfig path (env KUBECONFIG)
+  -label-file PATH      downwardAPI label file for wake-up instead of watch (env PATIO_LABEL_FILE, requires source=rbg)
 
 run-only flags control callback timeout, start/shutdown budgets, backoff,
-and the diagnostics listen address (env PATIO_LISTEN_ADDRESS, default :9090).
+the label-file polling interval, and the diagnostics listen address
+(env PATIO_LISTEN_ADDRESS, default :9090).
 `)
 }
 
@@ -141,6 +147,9 @@ func validateSourceConfig(config *cliConfig) error {
 	case "rbg":
 		if config.riNamespace == "" || config.riName == "" {
 			return errors.New("--source=rbg requires --ri-namespace and --ri-name")
+		}
+		if config.labelFile != "" && config.labelPollEvery <= 0 {
+			return errors.New("--label-file requires a positive --label-poll-interval")
 		}
 		return nil
 	default:
@@ -235,7 +244,14 @@ func newRBGSource(logger *slog.Logger, config *cliConfig) (runtime.SignalSource,
 	if err != nil {
 		return nil, fmt.Errorf("create dynamic client: %w", err)
 	}
-	source, err := rbg.New(client, config.riNamespace, config.riName, logger.With("source", "rbg"))
+	sourceOptions := []rbg.Option{rbg.WithLogger(logger.With("source", "rbg"))}
+	if config.labelFile != "" {
+		sourceOptions = append(sourceOptions, rbg.WithLabelFile(config.labelFile))
+		if config.labelPollEvery > 0 {
+			sourceOptions = append(sourceOptions, rbg.WithPollInterval(config.labelPollEvery))
+		}
+	}
+	source, err := rbg.New(client, config.riNamespace, config.riName, sourceOptions...)
 	if err != nil {
 		return nil, err
 	}
