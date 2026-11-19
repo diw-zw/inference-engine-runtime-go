@@ -20,10 +20,10 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/diw-zw/inference-engine-runtime-go/internal/diagnostics"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/event"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/source/rbg"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/internal/diagnostics"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/event"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/source/rbg"
 )
 
 const defaultConfigPath = "/etc/patio/events.yaml"

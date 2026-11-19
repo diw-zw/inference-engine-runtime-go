@@ -24,8 +24,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/source/rbg"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/source/rbg"
 )
 
 var riGVK = schema.GroupVersionKind{Group: rbg.Group, Version: rbg.Version, Kind: "RoleInstance"}

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/callback"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/plugin/noop"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/callback"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/plugin/noop"
 )
 
 func TestAddToRegistryRegistersNoop(t *testing.T) {

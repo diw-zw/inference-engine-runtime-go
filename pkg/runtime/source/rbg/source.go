@@ -24,7 +24,7 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	kcache "k8s.io/client-go/tools/cache"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
 )
 
 // observation is the opaque snapshot token: the credential of exactly one

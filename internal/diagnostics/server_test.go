@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
 )
 
 func TestServerHealthAndReadiness(t *testing.T) {

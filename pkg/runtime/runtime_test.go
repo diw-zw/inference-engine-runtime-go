@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/callback"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/event"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/callback"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/event"
 )
 
 // fakeSource is an in-memory runtime.SignalSource for exercising the runtime.

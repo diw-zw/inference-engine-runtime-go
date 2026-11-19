@@ -1,4 +1,4 @@
-module github.com/diw-zw/inference-engine-runtime-go
+module github.com/rolebasedgroup/inference-engine-runtime-go
 
 go 1.25
 

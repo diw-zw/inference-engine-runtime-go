@@ -26,7 +26,7 @@ Inference Engine Runtime 是一个伴随单个推理实例运行的 Go 进程（
 3. 回调成功后，runtime 进程清除这个标签；编排系统看到标签消失，才开始真正的更新；
 4. runtime 进程收到 SIGTERM 时，先取消并等待当前回调返回，再依次运行 end 回调（例如恢复路由），然后退出。
 
-当前版本交付的是这套执行机制：回调注册与绑定、串行执行、超时与重试、退出流程、诊断端点，以及实验性的 RoleInstance 信号源。引擎探测、指标转换等能力不在当前范围（见 [design.md](design.md) 的边界划分）。
+当前版本交付的是这套执行机制：回调注册与绑定、串行执行、超时与重试、退出流程、诊断端点，以及实验性的 RoleInstance 信号源。引擎探测、指标转换等能力不在当前范围。
 
 ## 工作方式
 
@@ -53,8 +53,8 @@ runtime 进程
 
 ```go
 import (
-    "github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
-    "github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/event"
+    "github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
+    "github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/event"
 )
 
 registry := runtime.NewDefaultRegistry()                  // 内置 noop

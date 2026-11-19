@@ -10,7 +10,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/callback"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/callback"
 )
 
 // Callback completes immediately without doing anything.

@@ -1,8 +1,8 @@
 package runtime
 
 import (
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/callback"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/plugin/noop"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/callback"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/plugin/noop"
 )
 
 // NewDefaultRegistry returns a new registry preloaded with the standard

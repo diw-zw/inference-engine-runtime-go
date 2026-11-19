@@ -7,7 +7,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/callback"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/callback"
 )
 
 // Callback invocation results, used as low-cardinality metric labels.

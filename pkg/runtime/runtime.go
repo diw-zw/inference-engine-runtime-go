@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/callback"
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime/event"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/callback"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime/event"
 )
 
 // Runtime executes registered callbacks for one logical target: start

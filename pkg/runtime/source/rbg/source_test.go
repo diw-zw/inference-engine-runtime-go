@@ -19,7 +19,7 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 	ktesting "k8s.io/client-go/testing"
 
-	"github.com/diw-zw/inference-engine-runtime-go/pkg/runtime"
+	"github.com/rolebasedgroup/inference-engine-runtime-go/pkg/runtime"
 )
 
 var riGVK = schema.GroupVersionKind{Group: Group, Version: Version, Kind: "RoleInstance"}
